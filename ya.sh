@@ -328,14 +328,81 @@ __INTERNAL_yash_sanitize_value() {
   eval "$val_name=\"\${buffer:1}\""
 }
 
+# Unquote YAML scalar: strip outer ' or ", and resolve escapes.
+# Double-quoted: use printf '%b' to resolve \\ \" \n \r \t \xNN (same as echo -e;
+# printf '%b' is used so content starting with -n/-e is not treated as options).
+# Single-quoted: '' -> '.
 __INTERNAL_yash_unquote() {
-  local var_name="$1"
-  if [[ "${!var_name}" =~ ^[[:space:]]*\"(.*)\"[[:space:]]*$ ]] || [[ "${!var_name}" =~ ^[[:space:]]*\'(.*)\'[[:space:]]*$ ]]; then #"
-    eval "$var_name=\${BASH_REMATCH[1]}" || {
-      yashLogError "could not unquote ${!var_name}"
-      return 1
-    }
+  local var_name="$1" s result="" inner="" i=0 c len closed=0
+  s="${!var_name}"
+  # Trim leading/trailing whitespace so we can detect quoted form reliably.
+  [[ "$s" =~ ^[[:space:]]*(.*)[[:space:]]*$ ]] && s="${BASH_REMATCH[1]}"
+  len=${#s}
+  # Too short for "x" or 'x'; or not quoted at all -> leave as-is.
+  [[ $len -lt 2 ]] && return 0
+  c="${s:0:1}"
+  if [[ "$c" != "'" && "$c" != '"' ]]; then
+    return 0
   fi
+  if [[ "$c" == '"' ]]; then
+    # Double-quoted: extract inner string (so \" does not end the string), then
+    # resolve escapes via printf '%b' (like echo -e but safe for -n/-e content).
+    i=1
+    closed=0
+    while [[ $i -lt $len ]]; do
+      c="${s:$i:1}"
+      if [[ "$c" == "\\" ]]; then
+        # backslash: add to inner string.
+        ((i++))
+        [[ $i -lt $len ]] && inner+="\\${s:$i:1}" && ((i++))
+        # literal backslash at end of string
+        [[ $i -ge $len ]] && inner+="\\"
+      elif [[ "$c" == '"' ]]; then
+        # Closing double-quote: end of scalar. Trailing content would be invalid.
+        ((i++))
+        if [[ $i -lt $len && "${s:$i}" =~ [^[:space:]] ]]; then
+          yashLogError "unexpected content after closing quote"
+          return 1
+        fi
+        closed=1
+        break
+      else
+        # other characters are added to the inner string.
+        inner+="${c}"
+        ((i++))
+      fi
+    done
+    # Reached end without closing " (e.g. "hello' or "hello) -> mismatched/unclosed quote.
+    [[ $closed -eq 0 ]] && { yashLogError "unclosed double-quote"; return 1; }
+    printf -v result '%b' "$inner"
+  else
+    # Single-quoted: only '' is escape (literal ').
+    i=1
+    closed=0
+    while [[ $i -lt $len ]]; do
+      c="${s:$i:1}"
+      if [[ "$c" == "'" && $((i+1)) -lt $len && "${s:$((i+1)):1}" == "'" ]]; then
+        result+="'"
+        ((i++))
+      elif [[ "$c" == "'" ]]; then
+        # Closing single-quote: end of scalar. Trailing content would be invalid.
+        ((i++))
+        if [[ $i -lt $len && "${s:$i}" =~ [^[:space:]] ]]; then
+          yashLogError "unexpected content after closing quote"
+          return 1
+        fi
+        closed=1
+        break
+      else
+        result+="${c}"
+      fi
+      ((i++))
+    done
+    # Reached end without closing ' (e.g. 'hello") -> mismatched/unclosed quote.
+    [[ $closed -eq 0 ]] && { yashLogError "unclosed single-quote"; return 1; }
+  fi
+  # Safe assignment: no eval, so content cannot break or inject.
+  printf -v "$var_name" '%s' "$result"
 }
 
 : <<'=cut'
