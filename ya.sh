@@ -405,6 +405,20 @@ __INTERNAL_yash_unquote() {
   printf -v "$var_name" '%s' "$result"
 }
 
+# Strip YAML tag (!!word) from scalar and optional following space.
+# Normalize !!null: empty or "null" -> "null". Other built-in tags (!!str, !!int, etc.) just stripped.
+__INTERNAL_yash_strip_tag() {
+  local var_name="$1" s="${!var_name}"
+  if [[ "$s" =~ ^[[:space:]]*(!![[:alnum:]-]+)[[:space:]]*(.*)$ ]]; then
+    s="${BASH_REMATCH[2]}"
+    [[ "$s" =~ ^[[:space:]]*(.*)[[:space:]]*$ ]] && s="${BASH_REMATCH[1]}"
+    if [[ "${BASH_REMATCH[1]}" == "!!null" && -z "$s" ]]; then
+      s="null"
+    fi
+    printf -v "$var_name" '%s' "$s"
+  fi
+}
+
 : <<'=cut'
 =pod
 
@@ -446,6 +460,7 @@ yash_parse() {
     __INTERNAL_yash_parse_item data_type key value "$item" || return 1
     [[ "$item_type" == "index" ]] && key=$((index++))
     __INTERNAL_yash_unquote key || return 1
+    __INTERNAL_yash_strip_tag key
     yashLogDebug "$prefix$key ($data_type):"
     yashLogDebug "$value'"
     yashLogDebug "-----------------------------"
@@ -454,6 +469,7 @@ yash_parse() {
         eval "${yaml_name}[\"\$prefix\$key\"]='null'"
       else
         __INTERNAL_yash_unquote value || return 1
+        __INTERNAL_yash_strip_tag value
         eval "${yaml_name}[\"\$prefix\$key\"]=\"\${value}\""
       fi
     }
