@@ -106,7 +106,7 @@ __INTERNAL_yash_get_next() {
 
 __INTERNAL_yash_clean() {
   # remove comments
-  local line IFS=$'\n' buffer non_space out="$1" in="$2"
+  local line IFS=$'\n' buffer non_space out_name="$1" in="$2"
   while read -r line; do
     [[ "$line" == "---" ]] && {
       buffer=''
@@ -120,7 +120,7 @@ __INTERNAL_yash_clean() {
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     buffer+=$'\n'"$line"
   done <<< "$in"
-  eval "$out=\"\${buffer:1}\""
+  eval "$out_name=\"\${buffer:1}\""
 }
 
 __INTERNAL_yash_parse_item() {
@@ -380,12 +380,12 @@ yash_parse() {
     yashLogDebug "$value'"
     yashLogDebug "-----------------------------"
     [[ "$data_type" != "struct" ]] && {
-      [[ -z "$value" ]] && {
-        eval "${yaml_name}['$prefix$key']='null'"
-      } || {
+      if [[ -z "$value" ]]; then
+        eval "${yaml_name}[\"\$prefix\$key\"]='null'"
+      else
         __INTERNAL_yash_unquote value || return 1
-        eval "${yaml_name}['$prefix$key']=\"\${value}\""
-      }
+        eval "${yaml_name}[\"\$prefix\$key\"]=\"\${value}\""
+      fi
     }
     if [[ "$data_type" == "struct" ]]; then
       yashLogDebug "_____________________________"
