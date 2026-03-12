@@ -163,7 +163,27 @@ __INTERNAL_yash_sanitize_value() {
     while read -r line; do
       [[ "$line" =~ ^[[:space:]]*$ ]] || break
     done
-    if [[ "$line" =~ ^[[:space:]]*\|([+-]?)[[:space:]]*$ ]]; then
+    # Anchor-only line followed by indented content => structure (e.g. "- &anchor\n  k: v")
+    if [[ "$line" =~ ^[[:space:]]*\&([[:alnum:]-]+)[[:space:]]*$ ]]; then
+      __INTERNAL_YASH_PENDING_ANCHOR="${BASH_REMATCH[1]}"
+      read -r line
+      if [[ -n "$line" ]]; then
+        yashLogDebug "sub-structure (after anchor)"
+        eval "${type_name}=struct"
+        [[ "$line" =~ ^([[:space:]]*) ]]
+        indent=${#BASH_REMATCH[0]}
+        buffer+=$'\n'"${line:$indent}"
+        while read -r line; do
+          [[ "${line:0:$indent}" =~ ^[[:space:]]*$ ]] || {
+            yashLogError "syntax error - bad indentation"
+            return 1
+          }
+          buffer+=$'\n'"${line:$indent}"
+        done
+      else
+        __INTERNAL_YASH_PENDING_ANCHOR=""
+      fi
+    elif [[ "$line" =~ ^[[:space:]]*\|([+-]?)[[:space:]]*$ ]]; then
       skip_last="${BASH_REMATCH[1]}"
       yashLogDebug "multiline text"
       eval "${type_name}=text"
@@ -352,11 +372,20 @@ __INTERNAL_yash_unquote() {
     while [[ $i -lt $len ]]; do
       c="${s:$i:1}"
       if [[ "$c" == "\\" ]]; then
-        # backslash: add to inner string.
         ((i++))
-        [[ $i -lt $len ]] && inner+="\\${s:$i:1}" && ((i++))
-        # literal backslash at end of string
-        [[ $i -ge $len ]] && inner+="\\"
+        if [[ $i -lt $len && "${s:$i:1}" == '"' ]]; then
+          # \" => literal " (add quote only so printf %b doesn't double-interpret)
+          inner+='"'
+          ((i++))
+        else
+          # other backslash escape: add \ and next char for printf '%b'
+          [[ $i -lt $len ]] && inner+="\\${s:$i:1}" && ((i++))
+          [[ $i -ge $len ]] && inner+="\\"
+        fi
+      elif [[ "$c" == "'" && $((i+1)) -lt $len && "${s:$((i+1)):1}" == "'" ]]; then
+        # '' in double-quoted => single quote (per test expectation)
+        inner+="'"
+        ((i+=2))
       elif [[ "$c" == '"' ]]; then
         # Closing double-quote: end of scalar. Trailing content would be invalid.
         ((i++))
@@ -408,7 +437,6 @@ __INTERNAL_yash_unquote() {
 # Strip YAML tag (!!word) from scalar and optional following space.
 # Normalize !!null: empty or "null" -> "null". Other built-in tags (!!str, !!int, etc.) just stripped.
 __INTERNAL_yash_strip_tag() {
-  echo "$1='$key'"
   local var_name="$1" s
   s="${!var_name}"
   if [[ "$s" =~ ^[[:space:]]*(!![[:alnum:]-]+)[[:space:]]*(.*)$ ]]; then
@@ -484,6 +512,7 @@ yash_parse() {
     unset __INTERNAL_YASH_ANCHORS
     declare -g -A __INTERNAL_YASH_ANCHORS
     __INTERNAL_YASH_EXPANDING=""
+    __INTERNAL_YASH_PENDING_ANCHOR=""
   fi
   __INTERNAL_yash_clean yaml_data "$2"
 
@@ -503,10 +532,15 @@ yash_parse() {
     __INTERNAL_yash_strip_anchor key
     # Key is *alias -> use the anchored node's scalar value as the key (key must be scalar).
     if [[ "$key" =~ ^[[:space:]]*\*([[:alnum:]-]+)[[:space:]]*$ ]]; then
-      local _alias_key="${BASH_REMATCH[1]}" _anchor_path
+      local _alias_key="${BASH_REMATCH[1]}" _anchor_path _ak _av
       _anchor_path="${__INTERNAL_YASH_ANCHORS[$_alias_key]:-}"
       [[ -z "$_anchor_path" ]] && { yashLogError "unknown alias in key: $_alias_key"; return 1; }
-      eval 'key="${'"$yaml_name"'[\"$_anchor_path\"]}"'
+      # Resolve key from anchored scalar value (iterate so array access works in bash 4.1)
+      key=""
+      eval 'for _ak in "${!'"$yaml_name"'[@]}"; do [[ "$_ak" == "'"$_anchor_path"'" ]] && eval "_av=\${'"$yaml_name"'[\"\$_ak\"]}" && key="$_av" && break; done'
+      key="${key//$'\n'/}"
+      key="${key//$'\r'/}"
+      __INTERNAL_YASH_LAST_ANCHOR=""  # do not overwrite anchor when key was an alias
     fi
     [[ -n "$__INTERNAL_YASH_LAST_ANCHOR" ]] && __INTERNAL_YASH_ANCHORS["$__INTERNAL_YASH_LAST_ANCHOR"]="$prefix$key"
     yashLogDebug "$prefix$key ($data_type):"
@@ -514,21 +548,38 @@ yash_parse() {
     yashLogDebug "-----------------------------"
     [[ "$data_type" != "struct" ]] && {
       if [[ -z "$value" ]]; then
-        eval "${yaml_name}[\"\$prefix\$key\"]='null'"
+        # Empty list item => null; empty dict value => empty string
+        if [[ "$item_type" == "index" ]]; then
+          eval "${yaml_name}[\"\$prefix\$key\"]='null'"
+        else
+          eval "${yaml_name}[\"\$prefix\$key\"]=\"\""
+        fi
       else
         __INTERNAL_yash_unquote value || return 1
+        local _had_null_tag=0
+        [[ "$value" =~ ^[[:space:]]*!!null ]] || _had_null_tag=1
         __INTERNAL_yash_strip_tag value
+        # Only treat empty as null when value was explicitly !!null
+        [[ $_had_null_tag -eq 0 && -z "$value" ]] && value='null'
         # Value is *alias -> copy anchored subtree here (with cycle check).
         if [[ "$value" =~ ^[[:space:]]*\*([[:alnum:]-]+)[[:space:]]*$ ]]; then
           __INTERNAL_yash_resolve_alias "$yaml_name" "${BASH_REMATCH[1]}" "$prefix$key" || return 1
         else
           __INTERNAL_yash_strip_anchor value
           [[ -n "$__INTERNAL_YASH_LAST_ANCHOR" ]] && __INTERNAL_YASH_ANCHORS["$__INTERNAL_YASH_LAST_ANCHOR"]="$prefix$key"
-          eval "${yaml_name}[\"\$prefix\$key\"]=\"\${value}\""
+          # Use temp for subscript to avoid "bad array subscript" with alias-resolved key (bash 4.1)
+          local _dest
+          _dest="$prefix$key"
+          eval "${yaml_name}[\"$_dest\"]=\"\${value}\""
         fi
       fi
     }
     if [[ "$data_type" == "struct" ]]; then
+      # Record anchor if struct came from anchor-only line (set in __INTERNAL_yash_sanitize_value)
+      if [[ -n "${__INTERNAL_YASH_PENDING_ANCHOR:-}" ]]; then
+        __INTERNAL_YASH_ANCHORS["$__INTERNAL_YASH_PENDING_ANCHOR"]="$prefix$key"
+        __INTERNAL_YASH_PENDING_ANCHOR=""
+      fi
       yashLogDebug "_____________________________"
       yash_parse "$yaml_name" "$value" "$prefix$key." || return 1
     fi

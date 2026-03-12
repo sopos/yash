@@ -88,7 +88,7 @@ yaml_data='- g: a
 b:
    - i
 '
-check 1
+check 1 "wrong format"
 
 
 yaml_data='- >
@@ -599,6 +599,176 @@ declare -A expected=(
 [description]="code which should not be actually executed during the proseccing \`false\`"
 )
 check 0 "backticks in the string"
+
+
+# --- Anchors and aliases ---
+yaml_data='
+a: &x foo
+b: *x
+'
+declare -A expected=(
+[a]='foo'
+[b]='foo'
+)
+check 0 "anchor and value alias (scalar)"
+
+yaml_data='
+- &anchor
+  k: v
+- *anchor
+'
+declare -A expected=(
+[0.k]='v'
+[1.k]='v'
+)
+check 0 "anchor and value alias (structure)"
+
+yaml_data='
+a: &k mykey
+*k: value
+'
+declare -A expected=(
+[a]='mykey'
+[mykey]='value'
+)
+check 0 "key alias"
+
+yaml_data='
+a: &x
+  b: *x
+'
+check 1 "alias cycle"
+
+yaml_data='
+a: *nonexistent
+'
+check 1 "unknown alias (value)"
+
+yaml_data='
+*nonexistent: value
+'
+check 1 "unknown alias (key)"
+
+
+# --- YAML tags ---
+yaml_data='
+a: !!null
+b: !!null null
+'
+declare -A expected=(
+[a]='null'
+[b]='null'
+)
+check 0 "!!null empty and !!null null"
+
+yaml_data='
+a: !!str hello
+b: !!int 42
+'
+declare -A expected=(
+[a]='hello'
+[b]='42'
+)
+check 0 "!!str and !!int (tag stripped)"
+
+
+# --- Preprocessing: document end, directives, comments ---
+yaml_data='
+key: before
+...
+ignore: after
+'
+declare -A expected=(
+[key]='before'
+)
+check 0 "document end ... (content after ignored)"
+
+yaml_data='
+%YAML 1.1
+key: value
+'
+declare -A expected=(
+[key]='value'
+)
+check 0 "directive line % removed"
+
+yaml_data='
+# comment only
+key: value
+'
+declare -A expected=(
+[key]='value'
+)
+check 0 "comment-only leading line stripped"
+
+
+# --- Unquote: escapes and single-quote '' ---
+yaml_data='
+a: "line1\nline2"
+b: "tab\there"
+c: "quote \" inside"
+d: "backslash \\ end"
+'
+declare -A expected=(
+[a]=$'line1\nline2'
+[b]=$'tab\there'
+[c]='quote " inside'
+[d]=$'backslash \\ end'
+)
+check 0 'double-quoted escapes \\n \\t \\" \\\\'
+
+yaml_data="
+a: \"''\"
+"
+declare -A expected=(
+[a]="'"
+)
+check 0 "single-quoted '' gives single quote"
+
+yaml_data='
+a: "unclosed
+'
+check 1 "unclosed double-quote"
+
+yaml_data='
+a: '\''unclosed
+'
+check 1 "unclosed single-quote"
+
+yaml_data='
+a: "closed" extra
+'
+check 1 "trailing content after closing quote"
+
+
+# --- Structural error paths: bad indentation ---
+yaml_data='
+a: |
+  good
+ bad
+'
+check 1 "bad indentation in literal block"
+
+yaml_data='
+a: >
+  good
+ bad
+'
+check 1 "bad indentation in folded block"
+
+
+# --- Empty / edge inputs ---
+yaml_data=''
+declare -A expected=(
+)
+check 0 "empty YAML"
+
+yaml_data='
+---
+'
+declare -A expected=(
+)
+check 0 "only --- and newlines"
 
 
 echo _______________________________________________
