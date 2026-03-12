@@ -111,16 +111,15 @@ __INTERNAL_yash_clean() {
     [[ "$line" == "---" ]] && {
       buffer=''
       seen_doc_end=''
+      non_space=''
       continue
     }
     [[ "$line" == "..." ]] && { seen_doc_end=1; continue; }
     [[ -n "$seen_doc_end" ]] && continue
     # remove first empty lines
-    [[ -z "$non_space" && "$line" =~ ^[[:space:]]*$ ]] && {
-      non_space=1
-      continue
-    }
+    [[ -z "$non_space" && "$line" =~ ^[[:space:]]*$ ]] && continue
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ [^[:space:]] ]] && non_space=1
     buffer+=$'\n'"$line"
   done <<< "$in"
   eval "$out_name=\"\${buffer:1}\""
