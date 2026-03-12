@@ -105,7 +105,7 @@ __INTERNAL_yash_get_next() {
 }
 
 __INTERNAL_yash_clean() {
-  # remove comments and document markers
+  # remove comments, document markers, and directives
   local line IFS=$'\n' buffer non_space out_name="$1" in="$2" seen_doc_end
   while read -r line; do
     [[ "$line" == "---" ]] && {
@@ -116,6 +116,7 @@ __INTERNAL_yash_clean() {
     }
     [[ "$line" == "..." ]] && { seen_doc_end=1; continue; }
     [[ -n "$seen_doc_end" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*% ]] && continue
     # remove first empty lines
     [[ -z "$non_space" && "$line" =~ ^[[:space:]]*$ ]] && continue
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
