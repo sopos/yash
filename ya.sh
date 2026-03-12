@@ -408,7 +408,9 @@ __INTERNAL_yash_unquote() {
 # Strip YAML tag (!!word) from scalar and optional following space.
 # Normalize !!null: empty or "null" -> "null". Other built-in tags (!!str, !!int, etc.) just stripped.
 __INTERNAL_yash_strip_tag() {
-  local var_name="$1" s="${!var_name}"
+  echo "$1='$key'"
+  local var_name="$1" s
+  s="${!var_name}"
   if [[ "$s" =~ ^[[:space:]]*(!![[:alnum:]-]+)[[:space:]]*(.*)$ ]]; then
     s="${BASH_REMATCH[2]}"
     [[ "$s" =~ ^[[:space:]]*(.*)[[:space:]]*$ ]] && s="${BASH_REMATCH[1]}"
@@ -417,6 +419,37 @@ __INTERNAL_yash_strip_tag() {
     fi
     printf -v "$var_name" '%s' "$s"
   fi
+}
+
+# Strip YAML anchor &name from start of scalar; sets __INTERNAL_YASH_LAST_ANCHOR if found.
+__INTERNAL_yash_strip_anchor() {
+  local var_name="$1" s
+  s="${!var_name}"
+  __INTERNAL_YASH_LAST_ANCHOR=""
+  if [[ "$s" =~ ^[[:space:]]*\&([[:alnum:]-]+)([[:space:]]+(.*))?$ ]]; then
+    __INTERNAL_YASH_LAST_ANCHOR="${BASH_REMATCH[1]}"
+    s="${BASH_REMATCH[3]:-}"
+    [[ "$s" =~ ^[[:space:]]*(.*)[[:space:]]*$ ]] && s="${BASH_REMATCH[1]}"
+    printf -v "$var_name" '%s' "$s"
+  fi
+}
+
+# Copy subtree at anchor to current_path in array yaml_name. Detect cycle.
+__INTERNAL_yash_resolve_alias() {
+  local yaml_name="$1" alias_name="$2" current_path="$3" anchor_path k newkey v safe
+  [[ "$__INTERNAL_YASH_EXPANDING" == *"|${alias_name}|"* ]] && { yashLogError "alias cycle detected: $alias_name"; return 1; }
+  [[ -z "${__INTERNAL_YASH_ANCHORS[$alias_name]:-}" ]] && { yashLogError "unknown alias: $alias_name"; return 1; }
+  anchor_path="${__INTERNAL_YASH_ANCHORS[$alias_name]}"
+  __INTERNAL_YASH_EXPANDING+="|${alias_name}|"
+  eval 'for k in "${!'"$yaml_name"'[@]}"; do
+    [[ "$k" == "'"$anchor_path"'" || "$k" == "'"$anchor_path"'".* ]] || continue
+    if [[ "$k" == "'"$anchor_path"'" ]]; then newkey="'"$current_path"'"; else newkey="'"$current_path"'.${k#'"$anchor_path"'.}"; fi
+    eval "v=\${'"$yaml_name"'[\"$k\"]}"
+    safe=$(printf "%q" "$v")
+    eval "'"$yaml_name"'[\"$newkey\"]=$safe"
+  done'
+  __INTERNAL_YASH_EXPANDING="${__INTERNAL_YASH_EXPANDING/|${alias_name}|/}"
+  return 0
 }
 
 : <<'=cut'
@@ -446,6 +479,12 @@ The actual yaml data.
 
 yash_parse() {
   local yaml_data item key value data_type item_type item_type_prev prefix="$3" index=0 yaml_name="$1" res=0
+  # Top-level: init anchors and alias-expansion tracking for this parse.
+  if [[ -z "$prefix" ]]; then
+    unset __INTERNAL_YASH_ANCHORS
+    declare -g -A __INTERNAL_YASH_ANCHORS
+    __INTERNAL_YASH_EXPANDING=""
+  fi
   __INTERNAL_yash_clean yaml_data "$2"
 
   yashLogDebug "$yaml_data"
@@ -461,6 +500,15 @@ yash_parse() {
     [[ "$item_type" == "index" ]] && key=$((index++))
     __INTERNAL_yash_unquote key || return 1
     __INTERNAL_yash_strip_tag key
+    __INTERNAL_yash_strip_anchor key
+    # Key is *alias -> use the anchored node's scalar value as the key (key must be scalar).
+    if [[ "$key" =~ ^[[:space:]]*\*([[:alnum:]-]+)[[:space:]]*$ ]]; then
+      local _alias_key="${BASH_REMATCH[1]}" _anchor_path
+      _anchor_path="${__INTERNAL_YASH_ANCHORS[$_alias_key]:-}"
+      [[ -z "$_anchor_path" ]] && { yashLogError "unknown alias in key: $_alias_key"; return 1; }
+      eval 'key="${'"$yaml_name"'[\"$_anchor_path\"]}"'
+    fi
+    [[ -n "$__INTERNAL_YASH_LAST_ANCHOR" ]] && __INTERNAL_YASH_ANCHORS["$__INTERNAL_YASH_LAST_ANCHOR"]="$prefix$key"
     yashLogDebug "$prefix$key ($data_type):"
     yashLogDebug "$value'"
     yashLogDebug "-----------------------------"
@@ -470,7 +518,14 @@ yash_parse() {
       else
         __INTERNAL_yash_unquote value || return 1
         __INTERNAL_yash_strip_tag value
-        eval "${yaml_name}[\"\$prefix\$key\"]=\"\${value}\""
+        # Value is *alias -> copy anchored subtree here (with cycle check).
+        if [[ "$value" =~ ^[[:space:]]*\*([[:alnum:]-]+)[[:space:]]*$ ]]; then
+          __INTERNAL_yash_resolve_alias "$yaml_name" "${BASH_REMATCH[1]}" "$prefix$key" || return 1
+        else
+          __INTERNAL_yash_strip_anchor value
+          [[ -n "$__INTERNAL_YASH_LAST_ANCHOR" ]] && __INTERNAL_YASH_ANCHORS["$__INTERNAL_YASH_LAST_ANCHOR"]="$prefix$key"
+          eval "${yaml_name}[\"\$prefix\$key\"]=\"\${value}\""
+        fi
       fi
     }
     if [[ "$data_type" == "struct" ]]; then
